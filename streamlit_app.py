@@ -1,38 +1,64 @@
-from collections import namedtuple
-import altair as alt
-import math
-import pandas as pd
 import streamlit as st
+import json
+import pandas as pd
+import snowflake.connector
+import matplotlib
 
 """
-# Welcome to Streamlit!
+# Notehub to Snowflake Demo!
 
-Edit `/streamlit_app.py` to customize this app to your heart's desire :heart:
+This demo pulls data from Snowflake that was routed from [this Notehub project](https://notehub.io/project/app:7580945e-58ae-424c-b254-5ec55ee2eeff/).
 
-If you have any questions, checkout our [documentation](https://docs.streamlit.io) and [community
-forums](https://discuss.streamlit.io).
+Each button press on a connected host is sent to the Notecard as a `note.add` with
+the OS running on the Host MCU and a count of presses since last restart.
 
-In the meantime, below is an example of what you can do with just a few lines of code:
+```json
+{"req":"note.add","sync":true,"body":{"os":"zephyr","button_count":16}}
+```
+
+Raw JSON is routed to Snowflake using the Snowflake SQL API and transformed into
+a structured data table using a view.
+
 """
 
+"""
+### Options
+"""
 
 with st.echo(code_location='below'):
-    total_points = st.slider("Number of points in spiral", 1, 5000, 2000)
-    num_turns = st.slider("Number of turns in spiral", 1, 100, 9)
+    num_rows = st.slider('Rows to fetch?', 1, 50, 30)
+    sort = st.selectbox('Sort?',('asc', 'desc'))
 
-    Point = namedtuple('Point', 'x y')
-    data = []
+    # Initialize connection.
+    @st.experimental_singleton
+    def init_connection():
+        return snowflake.connector.connect(**st.secrets["snowflake"])
 
-    points_per_turn = total_points / num_turns
+    conn = init_connection()
 
-    for curr_point_num in range(total_points):
-        curr_turn, i = divmod(curr_point_num, points_per_turn)
-        angle = (curr_turn + 1) * 2 * math.pi * i / points_per_turn
-        radius = curr_point_num / total_points
-        x = radius * math.cos(angle)
-        y = radius * math.sin(angle)
-        data.append(Point(x, y))
+    # Perform query.
+    @st.experimental_memo(ttl=600)
+    def run_query(query):
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()
 
-    st.altair_chart(alt.Chart(pd.DataFrame(data), height=500, width=500)
-        .mark_circle(color='#0068c9', opacity=0.5)
-        .encode(x='x:Q', y='y:Q'))
+    # Select rows from a snowflake view on top of JSON data
+    rows = run_query(f'SELECT * from data_vw ORDER BY received {sort} limit {num_rows};')
+
+    """
+    ## Notecard `data.qo` Events
+    """
+
+    notecard_data = pd.DataFrame(rows, columns=("id", "Button Count", "OS", "Location", "Location Type", "Date"))
+    table = notecard_data.style.background_gradient(cmap="Spectral")
+    table
+
+    """
+    ### Summarized Data
+    """
+
+    group = notecard_data.groupby("OS")["Button Count"].count()
+    group
+
+    st.bar_chart(group)
